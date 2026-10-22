@@ -95,7 +95,7 @@
 - [x] 每个 change 归档时，增量更新 README：问题理解、架构、关键决策。
 - [x] README 或设计文档逐条回答题目的"设计说明要求"：系统边界、投递语义、长期不可用时的策略、不采纳的 AI 建议、演进方向。
 - [x] 把 docs/ai-review.md 整理进"不采纳的 AI 建议"一节。
-- [ ] 把 AI 会话记录打包成 zip，放进仓库。
+- [x] 把 AI 会话记录打包成 zip，放进仓库（docs/ai-sessions.zip）。
 
 ## Out of scope
 
@@ -139,3 +139,4 @@
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · C 实现完成：tasks 12/12，179 个测试通过，validate --strict 通过；待候选人验收后 archive
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · C 验收通过并 archive（2026-10-22-isolation-ops）：main specs 新建 notification-query、notification-replay、service-metrics，更新 notification-delivery（新增 1 条、修改 1 条）
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · 交付收尾：README 新增整体架构与逐条设计说明，候选人确认
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · 交付收尾：AI 会话记录打包为 docs/ai-sessions.zip（含阶段索引），交付收尾清单全部完成

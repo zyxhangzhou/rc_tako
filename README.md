@@ -2,7 +2,7 @@
 
 业务系统把要发送的外部 HTTP 请求（URL / Method / Header / Body）提交给本服务，由本服务负责可靠地投递到目标地址；业务系统不需要等待结果。题目见 [docs/assignment.md](docs/assignment.md)。
 
-> 三个 change 都已完成：受理与持久化（A）、投递引擎（B）、隔离与运维（C）。拆分计划见 [mydoc/plans/notification-delivery/](mydoc/plans/notification-delivery/)，AI 建议的处理记录见 [docs/ai-review.md](docs/ai-review.md)。
+> 三个 change 都已完成：受理与持久化（A）、投递引擎（B）、隔离与运维（C）。拆分计划见 [mydoc/plans/notification-delivery/](mydoc/plans/notification-delivery/)，AI 建议的处理记录见 [docs/ai-review.md](docs/ai-review.md)，AI 会话记录见 [docs/ai-sessions.zip](docs/ai-sessions.zip)（内含按阶段的行号索引）。
 
 ## 问题理解
 
