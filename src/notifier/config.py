@@ -47,6 +47,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
 class WorkerSettings:
     db_path: Path
     concurrency: int = 16
+    per_host_limit: int = 4
     poll_interval_s: float = 1.0
     lease_s: float = 60.0
     request_timeout_s: float = 10.0
@@ -58,6 +59,7 @@ class WorkerSettings:
 # 环境变量名 -> (字段名, 类型)
 _WORKER_ENV = {
     "NOTIFIER_WORKER_CONCURRENCY": ("concurrency", int),
+    "NOTIFIER_WORKER_PER_HOST_LIMIT": ("per_host_limit", int),
     "NOTIFIER_WORKER_POLL_INTERVAL_S": ("poll_interval_s", float),
     "NOTIFIER_WORKER_LEASE_S": ("lease_s", float),
     "NOTIFIER_WORKER_REQUEST_TIMEOUT_S": ("request_timeout_s", float),
@@ -91,6 +93,8 @@ def load_worker_settings(env: dict[str, str] | None = None) -> WorkerSettings:
     # 占用期限必须覆盖一次完整请求，否则请求还没结束通知就会被别人重新取走
     if s.lease_s <= s.request_timeout_s:
         raise ConfigError("NOTIFIER_WORKER_LEASE_S 必须大于 NOTIFIER_WORKER_REQUEST_TIMEOUT_S")
+    if s.per_host_limit > s.concurrency:
+        raise ConfigError("NOTIFIER_WORKER_PER_HOST_LIMIT 不能大于 NOTIFIER_WORKER_CONCURRENCY")
     if s.backoff_cap_s < s.backoff_base_s:
         raise ConfigError("NOTIFIER_WORKER_BACKOFF_CAP_S 不能小于 NOTIFIER_WORKER_BACKOFF_BASE_S")
     return s

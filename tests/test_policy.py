@@ -54,16 +54,16 @@ def test_retry_after_used_and_clamped():
 
 
 def test_deadline_retry_budget_first():
-    d, reason = policy.deadline(T0, None, CFG)
+    d, reason = policy.deadline(MS(T0), None, CFG)
     assert (d, reason) == (MS(T0 + timedelta(hours=24)), store.REASON_RETRIES_EXHAUSTED)
-    d, reason = policy.deadline(T0, T0 + timedelta(hours=30), CFG)
+    d, reason = policy.deadline(MS(T0), T0 + timedelta(hours=30), CFG)
     assert reason == store.REASON_RETRIES_EXHAUSTED
 
 
 def test_deadline_expiry_first_or_tie():
-    d, reason = policy.deadline(T0, T0 + timedelta(minutes=5), CFG)
+    d, reason = policy.deadline(MS(T0), T0 + timedelta(minutes=5), CFG)
     assert (d, reason) == (MS(T0 + timedelta(minutes=5)), store.REASON_EXPIRED)
-    _, reason = policy.deadline(T0, T0 + timedelta(hours=24), CFG)
+    _, reason = policy.deadline(MS(T0), T0 + timedelta(hours=24), CFG)
     assert reason == store.REASON_EXPIRED
 
 
@@ -71,7 +71,7 @@ def test_candidate_example_next_retry_after_expiry():
     """候选人的例子：10:00 失败，正常算出 10:10，expires_at 10:05 → 等到 10:05，不提前标过期、不提前重试。"""
     created = T0 - timedelta(minutes=1)
     expires = T0 + timedelta(minutes=5)
-    d, reason = policy.deadline(created, expires, CFG)
+    d, reason = policy.deadline(MS(created), expires, CFG)
     nxt = policy.next_attempt_ms(1, MS(T0), 600, d, CFG, random.Random(0))
     assert nxt == MS(expires)
     assert reason == store.REASON_EXPIRED

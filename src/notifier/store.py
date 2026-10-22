@@ -8,11 +8,13 @@ import json
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 5000
 
 STATUS_PENDING = "pending"
@@ -25,7 +27,19 @@ REASON_RETRIES_EXHAUSTED = "retries_exhausted"
 REASON_EXPIRED = "expired"
 REASON_BLOCKED_TARGET = "blocked_target"
 
-_MIGRATIONS: dict[int, str] = {
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE notifications ADD COLUMN target_host TEXT NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE notifications ADD COLUMN retry_window_start INTEGER NOT NULL DEFAULT 0")
+    rows = conn.execute("SELECT id, url, created_at FROM notifications").fetchall()
+    for r in rows:
+        conn.execute(
+            "UPDATE notifications SET target_host = ?, retry_window_start = ? WHERE id = ?",
+            (target_host(r["url"]), to_ms(_from_text(r["created_at"])), r["id"]),
+        )
+    conn.execute("CREATE INDEX idx_notifications_host ON notifications (target_host, status)")
+
+
+_MIGRATIONS: dict[int, "str | Callable[[sqlite3.Connection], None]"] = {
     1: """
     CREATE TABLE notifications (
         id              TEXT PRIMARY KEY,
@@ -64,6 +78,8 @@ _MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX idx_attempts_notification ON delivery_attempts (notification_id, id);
     """,
+    # 按 host 限流的分组键；重放时重置的重试窗口起点（毫秒）
+    3: _migrate_v3,
 }
 
 
@@ -96,6 +112,8 @@ class Notification:
     attempt_count: int
     failure_reason: str | None
     finished_at: datetime | None
+    target_host: str
+    retry_window_start: int
 
 
 @dataclass(frozen=True)
@@ -153,9 +171,13 @@ def init_schema(db_path: Path) -> None:
         try:
             current = conn.execute("PRAGMA user_version").fetchone()[0]
             for version in range(current + 1, SCHEMA_VERSION + 1):
-                for stmt in _MIGRATIONS[version].split(";"):
-                    if stmt.strip():
-                        conn.execute(stmt)
+                migration = _MIGRATIONS[version]
+                if callable(migration):
+                    migration(conn)
+                else:
+                    for stmt in migration.split(";"):
+                        if stmt.strip():
+                            conn.execute(stmt)
                 conn.execute(f"PRAGMA user_version={version}")
             conn.execute("COMMIT")
         except BaseException:
@@ -193,8 +215,9 @@ def insert_or_get(conn: sqlite3.Connection, n: NewNotification) -> InsertResult:
                 """
                 INSERT INTO notifications
                     (id, caller, idempotency_key, request_hash, url, method,
-                     headers_json, body, expires_at, status, created_at, next_attempt_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     headers_json, body, expires_at, status, created_at, next_attempt_at,
+                     target_host, retry_window_start)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_id,
@@ -208,6 +231,8 @@ def insert_or_get(conn: sqlite3.Connection, n: NewNotification) -> InsertResult:
                     _to_text(n.expires_at),
                     STATUS_PENDING,
                     _to_text(now),
+                    to_ms(now),
+                    target_host(n.url),
                     to_ms(now),
                 ),
             )
@@ -228,30 +253,56 @@ def get(conn: sqlite3.Connection, notification_id: str) -> Notification | None:
     return None if row is None else _row_to_notification(row)
 
 
-def claim_due(conn: sqlite3.Connection, now_ms: int, limit: int, lease_ms: int) -> list[Claimed]:
+def claim_due(
+    conn: sqlite3.Connection, now_ms: int, limit: int, lease_ms: int, per_host_limit: int | None = None
+) -> list[Claimed]:
     """取出到期的通知并占用。
 
     两类通知可被取出：到期的 pending；占用已过期的 delivering（持有者崩溃或卡住）。
     每行写入新的随机 lease_token，写回时凭它做 fencing。attempt_count 在占用时就加 1，
     这样请求发出后崩溃的那次尝试也被计入。
+
+    per_host_limit：同一 target_host 同时持有有效占用的通知数上限。已满的 host 本轮跳过，
+    其余 host 照常取（按目标隔离，见 isolation-ops design D1）。None 表示不限。
     """
+    cap = per_host_limit if per_host_limit is not None else limit
     with conn:
         rows = conn.execute(
             """
+            WITH inflight AS (
+                SELECT target_host, count(*) AS n
+                  FROM notifications
+                 WHERE status = :delivering AND lease_until > :now
+                 GROUP BY target_host
+            ),
+            due AS (
+                SELECT id, target_host, next_attempt_at,
+                       ROW_NUMBER() OVER (PARTITION BY target_host ORDER BY next_attempt_at, id) AS rn
+                  FROM notifications
+                 WHERE (status = :pending AND next_attempt_at <= :now)
+                    OR (status = :delivering AND lease_until <= :now)
+            )
             UPDATE notifications
-               SET status = ?,
+               SET status = :delivering,
                    lease_token = lower(hex(randomblob(16))),
-                   lease_until = ?,
+                   lease_until = :lease_until,
                    attempt_count = attempt_count + 1
              WHERE id IN (
-                   SELECT id FROM notifications
-                    WHERE (status = ? AND next_attempt_at <= ?)
-                       OR (status = ? AND lease_until <= ?)
-                    ORDER BY next_attempt_at
-                    LIMIT ?)
+                   SELECT due.id
+                     FROM due LEFT JOIN inflight ON inflight.target_host = due.target_host
+                    WHERE due.rn <= :cap - coalesce(inflight.n, 0)
+                    ORDER BY due.next_attempt_at
+                    LIMIT :limit)
             RETURNING *
             """,
-            (STATUS_DELIVERING, now_ms + lease_ms, STATUS_PENDING, now_ms, STATUS_DELIVERING, now_ms, limit),
+            {
+                "delivering": STATUS_DELIVERING,
+                "pending": STATUS_PENDING,
+                "now": now_ms,
+                "lease_until": now_ms + lease_ms,
+                "cap": cap,
+                "limit": limit,
+            },
         ).fetchall()
     return [Claimed(notification=_row_to_notification(r), lease_token=r["lease_token"]) for r in rows]
 
@@ -334,6 +385,10 @@ def _finish(
     return cur.rowcount == 1
 
 
+def target_host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower()
+
+
 def to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
@@ -356,6 +411,8 @@ def _row_to_notification(row: sqlite3.Row) -> Notification:
         status=row["status"],
         created_at=_from_text(row["created_at"]),
         next_attempt_at=row["next_attempt_at"],
+        target_host=row["target_host"],
+        retry_window_start=row["retry_window_start"],
         attempt_count=row["attempt_count"],
         failure_reason=row["failure_reason"],
         finished_at=_from_text(row["finished_at"]),
@@ -368,3 +425,88 @@ def _to_text(dt: datetime | None) -> str | None:
 
 def _from_text(s: str | None) -> datetime | None:
     return None if s is None else datetime.fromisoformat(s)
+
+
+# --- 运维：按调用方读取、重放、指标（isolation-ops）---
+
+REPLAYED = "replayed"
+NOT_FOUND = "not_found"
+NOT_REPLAYABLE = "not_replayable"
+
+
+def get_for_caller(conn: sqlite3.Connection, notification_id: str, caller: str) -> Notification | None:
+    """他人的通知与不存在的通知一样返回 None，不暴露是否存在。"""
+    row = conn.execute(
+        "SELECT * FROM notifications WHERE id = ? AND caller = ?", (notification_id, caller)
+    ).fetchone()
+    return None if row is None else _row_to_notification(row)
+
+
+def replay(conn: sqlite3.Connection, notification_id: str, caller: str, now_ms: int) -> str:
+    """把失败终态的通知改回待投递，并从现在起重新计算重试窗口。
+
+    检查和修改在同一个写事务里完成（BEGIN IMMEDIATE），并发重放至多一个成功。
+    通知 ID 和 attempt_count 沿用，下游可以按 ID 去重。
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT status, failure_reason, expires_at FROM notifications WHERE id = ? AND caller = ?",
+            (notification_id, caller),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return NOT_FOUND
+        expires_at = _from_text(row["expires_at"])
+        if (
+            row["status"] != STATUS_FAILED
+            or row["failure_reason"] == REASON_EXPIRED
+            or (expires_at is not None and to_ms(expires_at) <= now_ms)
+        ):
+            conn.rollback()
+            return NOT_REPLAYABLE
+        conn.execute(
+            """
+            UPDATE notifications
+               SET status = ?, failure_reason = NULL, finished_at = NULL,
+                   next_attempt_at = ?, retry_window_start = ?
+             WHERE id = ? AND status = ?
+            """,
+            (STATUS_PENDING, now_ms, now_ms, notification_id, STATUS_FAILED),
+        )
+        conn.commit()
+        return REPLAYED
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+@dataclass(frozen=True)
+class Stats:
+    by_status: dict[str, int]
+    failed_by_reason: dict[str, int]
+    backlog_due: int
+    oldest_due_age_s: float
+    attempts_by_outcome: dict[str, int]
+
+
+def stats(conn: sqlite3.Connection, now_ms: int) -> Stats:
+    by_status = dict(conn.execute("SELECT status, count(*) FROM notifications GROUP BY status").fetchall())
+    failed_by_reason = dict(
+        conn.execute(
+            "SELECT failure_reason, count(*) FROM notifications WHERE status = ? GROUP BY failure_reason",
+            (STATUS_FAILED,),
+        ).fetchall()
+    )
+    backlog, oldest = conn.execute(
+        "SELECT count(*), min(next_attempt_at) FROM notifications WHERE status = ? AND next_attempt_at <= ?",
+        (STATUS_PENDING, now_ms),
+    ).fetchone()
+    attempts = dict(conn.execute("SELECT outcome, count(*) FROM delivery_attempts GROUP BY outcome").fetchall())
+    return Stats(
+        by_status=by_status,
+        failed_by_reason=failed_by_reason,
+        backlog_due=backlog,
+        oldest_due_age_s=0.0 if oldest is None else max(0.0, (now_ms - oldest) / 1000),
+        attempts_by_outcome=attempts,
+    )

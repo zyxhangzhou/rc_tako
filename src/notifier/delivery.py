@@ -57,7 +57,7 @@ def deliver_one(conn: sqlite3.Connection, claimed: store.Claimed, deps: Deps) ->
     """投递一条已占用的通知，返回最终写入的状态（占用丢失时返回 "lease_lost"）。"""
     n = claimed.notification
     now_ms = deps.clock()
-    deadline_ms, deadline_reason = policy.deadline(n.created_at, n.expires_at, deps.cfg)
+    deadline_ms, deadline_reason = policy.deadline(n.retry_window_start, n.expires_at, deps.cfg)
 
     # 发送前检查：两个期限哪个先到以哪个为准，到期即不再发送
     if now_ms >= deadline_ms:

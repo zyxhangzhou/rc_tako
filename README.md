@@ -2,7 +2,7 @@
 
 业务系统把要发送的外部 HTTP 请求（URL / Method / Header / Body）提交给本服务，由本服务负责可靠地投递到目标地址；业务系统不需要等待结果。题目见 [docs/assignment.md](docs/assignment.md)。
 
-> 本服务目前处于开发中。已完成：受理与持久化（change A）、投递引擎（change B）。未完成：隔离与运维（change C）。拆分计划见 [mydoc/plans/notification-delivery/](mydoc/plans/notification-delivery/)，AI 建议的处理记录见 [docs/ai-review.md](docs/ai-review.md)。
+> 三个 change 都已完成：受理与持久化（A）、投递引擎（B）、隔离与运维（C）。拆分计划见 [mydoc/plans/notification-delivery/](mydoc/plans/notification-delivery/)，AI 建议的处理记录见 [docs/ai-review.md](docs/ai-review.md)。
 
 ## 问题理解
 
@@ -12,7 +12,7 @@
 
 ## 可靠性承诺
 
-> 通知一旦受理，本服务会持续投递，直到出现以下三种结果之一：确认成功（2xx）；判定为永久失败（3xx，或 408、429 以外的 4xx）；到达截止时间。截止时间取"受理后 24 小时（可配置）"和调用方给的 `expires_at` 中较早的那个。后两种结果进入失败终态，并记录原因。人工重放由 change C 提供。
+> 通知一旦受理，本服务会持续投递，直到出现以下三种结果之一：确认成功（2xx）；判定为永久失败（3xx，或 408、429 以外的 4xx）；到达截止时间。截止时间取"受理后 24 小时（可配置）"和调用方给的 `expires_at` 中较早的那个。后两种结果进入失败终态，并记录原因。失败终态的通知可以查询，也可以人工重放（原因为已过期的除外）。
 
 投递语义是**至少一次**：每次投递都带 `X-Notification-Id`（同一条通知的所有尝试都相同）和 `X-Notification-Attempt`（从 1 开始），下游可以据此去重。本服务不承诺 exactly-once，也不保证顺序。
 
@@ -24,6 +24,8 @@
 | 4. 重试计划持久化 | 下一次重试时间存在 `next_attempt_at`（整数毫秒）里，不使用内存定时器 | `tests/test_worker.py::test_restart_does_not_retry_early` | ✅ B |
 | 5. 结果不明时按失败处理 | 超时、连接错误、请求发出后崩溃，都会进入重试 | `tests/test_delivery.py::test_processed_but_timed_out_is_redelivered_with_same_id` | ✅ B |
 | 6. 每次投递带同一个通知 ID | 系统写入的 Header 会覆盖提交时的同名项 | 同上，外加 SIGKILL 测试：两次请求的 ID 相同，attempt 分别为 1 和 2 | ✅ B |
+| 隔离：一个下游挂掉不拖累其他下游 | 取任务时按 host 限制并发，默认每个 host 4 条；限流状态存在库里，重启后仍然生效 | `tests/test_isolation.py`：X 卡死时，Y 在 3s 内全部送达。对照组不按 host 限流，Y 会被堵住 | ✅ C |
+| 终态可查询、可重放、可观测 | `GET /notifications/{id}`、`POST …/replay`、`GET /metrics` | `tests/test_ops_api.py`、`tests/test_ops_store.py`。并发重放时只有一个能成功 | ✅ C |
 
 **失败分类**：
 
@@ -40,7 +42,7 @@
 - 业务方在没收到受理回执时，会用同一个幂等 key 重试。
 - SIGKILL 测试只能证明进程崩溃时不丢数据；掉电时不丢数据依赖 fsync，没有实测过。
 
-## 关键决策（截至 change B）
+## 关键决策
 
 | 决策 | 选择 | 主要替代方案与不选的理由 |
 |---|---|---|
@@ -51,6 +53,10 @@
 | worker 进程模型 | 独立进程，和 API 共用同一个 SQLite 文件 | API 进程内的后台线程：API 崩溃时投递会一起停，uvicorn 多进程部署时还会起多份投递循环 |
 | 并发模型 | 固定大小线程池（默认 16）+ 同步 httpx | asyncio：并发上限更高，但会同步、异步混用，测试也更复杂 |
 | DNS rebinding | 投递前校验，接受残余窗口 | 严格绑定已校验的 IP：要自己处理 SNI 和证书，成本高，作为演进项 |
+| 按目标隔离 | 取任务时用 SQL 按 host 限流 | worker 内存信号量：任务排队等名额时，占用期限也在消耗 |
+| 重放 | 重置重试窗口；沿用同一个通知 ID 和尝试序号；已过期的通知拒绝重放 | 不重置窗口：重放后会立刻再次失败。允许重放已过期的通知：会绕过业务约束 |
+| 查询脱敏 | Header 白名单，其余值显示为 `***` | 关键词黑名单：Header 名不规范时密钥会泄露 |
+| 指标 | 抓取时从库里统计，手写 Prometheus 文本格式 | `prometheus_client`：两个进程各有一份计数器，重启后会归零 |
 | 截止时间 | min(重试期限, `expires_at`)，到期就不再发送，不做"最后再试一次" | AI 最初方案会在通知还没过期时就把它标成已过期，被候选人发现后否决；随后提出的"提前补一次尝试"也被否决，理由是规则更简单 |
 
 每项决策的完整理由见 `openspec/changes/archive/*/design.md`，AI 建议的采纳和否决记录见 [docs/ai-review.md](docs/ai-review.md)。
@@ -58,7 +64,10 @@
 ## 已知局限
 
 - **重复送达**：超时，或请求发出后 worker 崩溃，都会触发重投。下游需要用 `X-Notification-Id` 去重。这是"至少一次"语义的固有代价。
-- **慢下游会占满线程池**：一个持续超时的下游，最多能占满全部 16 个线程（每次占 10s）。按目标隔离由 change C 解决。
+- **只限流，不熔断**：一个持续超时的下游会一直占着它那 4 个名额，系统不会主动暂停对它的投递。某个 host 积压很多时，取任务的扫描成本会随积压量增长。
+- **隔离按 hostname 区分**：`localhost` 和 `127.0.0.1`、或同一后端的两个域名，会被当作两个 host，各自享有一份并发名额。
+- **重放没有持久化的审计记录**：谁在何时重放只记在日志里。
+- **查询结果只对 Header 脱敏**：url 的查询串、body 和响应摘录都原样返回给提交方本人。
 - **DNS rebinding 的残余窗口**：在"投递前校验"和"httpx 建立连接"之间，有一个毫秒级的窗口。要利用它，攻击者必须既是内网的可信调用方，又能控制目标域名的 DNS。
 - **返回 200 但 body 里是业务错误**：这种情况会被当作成功。这是透传边界带来的局限。
 - **只支持单 worker 进程**：占用机制本身不排斥多进程，但只验证过单 worker 的情况。
@@ -90,6 +99,7 @@ worker 的可选配置都是环境变量，下面是默认值：
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `NOTIFIER_WORKER_CONCURRENCY` | 16 | 同时投递的数量 |
+| `NOTIFIER_WORKER_PER_HOST_LIMIT` | 4 | 同一个目标 host 同时投递的上限，不能超过并发数 |
 | `NOTIFIER_WORKER_POLL_INTERVAL_S` | 1 | 没有到期任务时的轮询间隔 |
 | `NOTIFIER_WORKER_LEASE_S` | 60 | 占用期限，必须大于请求超时 |
 | `NOTIFIER_WORKER_REQUEST_TIMEOUT_S` | 10 | 单次请求的超时时间 |
@@ -111,11 +121,30 @@ curl -i -X POST http://127.0.0.1:8000/notifications \
       }'
 ```
 
-查看投递结果。查询接口在 change C 才提供，目前先直接查库：
+查询投递结果（把 `<id>` 换成上面返回的 id）：
 
 ```bash
-sqlite3 notifier.db "SELECT status, attempt_count, failure_reason FROM notifications"
-sqlite3 notifier.db "SELECT attempt_no, outcome, status_code, error FROM delivery_attempts"
+curl -s http://127.0.0.1:8000/notifications/<id> -H 'Authorization: Bearer dev-token'
+```
+
+失败与重放的演示：httpbin 的 `/status/400` 一定返回 400，所以这条通知会被判为永久失败。
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/notifications \
+  -H 'Authorization: Bearer dev-token' -H 'Content-Type: application/json' \
+  -d '{"url": "https://httpbin.org/status/400", "method": "POST", "idempotency_key": "evt-002"}'
+# 查询：status=failed，failure_reason=permanent_error
+curl -s http://127.0.0.1:8000/notifications/<id> -H 'Authorization: Bearer dev-token'
+# 重放：返回 202。下游仍然返回 400，所以重放后会再次失败，尝试序号接着往下编
+curl -s -X POST http://127.0.0.1:8000/notifications/<id>/replay -H 'Authorization: Bearer dev-token'
+# 对已送达的通知重放：返回 409
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8000/notifications/<已送达的 id>/replay -H 'Authorization: Bearer dev-token'
+```
+
+指标（不需要认证）：
+
+```bash
+curl -s http://127.0.0.1:8000/metrics
 ```
 
 运行测试：
@@ -143,3 +172,11 @@ sqlite3 notifier.db "SELECT attempt_no, outcome, status_code, error FROM deliver
 | `409` | 这个 key 已经被用在内容不同的请求上 |
 | `422` | 字段校验失败，或目标地址被禁止 |
 | `503` | 暂时无法持久化，请用同一个 key 重试 |
+
+## 运维接口
+
+| 接口 | 认证 | 说明 |
+|---|---|---|
+| `GET /notifications/{id}` | 提交方 token | 返回状态、失败原因、下一次重试时间、原始请求（Header 按白名单脱敏）和每次尝试的记录。他人的通知或不存在的通知都返回 404 |
+| `POST /notifications/{id}/replay` | 提交方 token | 把失败终态的通知改回待投递：沿用同一个通知 ID，重试窗口从现在重新计算。原因为已过期、已超过 `expires_at`、已送达，或还没进入终态时，返回 409 |
+| `GET /metrics` | 无 | Prometheus 文本格式，包括各状态数量、各失败原因数量、积压量（`notifier_backlog_due`）、最老一条待投递通知的等待秒数、各结果分类的尝试次数 |

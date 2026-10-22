@@ -35,11 +35,11 @@ def make_deps(cfg, clock=None, guard=allow_all):
     return Deps(cfg=cfg, client=make_client(cfg), guard=guard, clock=clock or FakeClock(), rng=random.Random(0))
 
 
-def insert(conn, url, key="evt-1", method="POST", headers=None, body='{"e":1}', expires_at=None):
+def insert(conn, url, key="evt-1", method="POST", headers=None, body='{"e":1}', expires_at=None, caller="crm"):
     return store.insert_or_get(
         conn,
         store.NewNotification(
-            caller="crm", idempotency_key=key, request_hash="h", url=url, method=method,
+            caller=caller, idempotency_key=key, request_hash="h", url=url, method=method,
             headers=headers if headers is not None else {"Content-Type": "application/json"},
             body=body, expires_at=expires_at,
         ),

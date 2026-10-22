@@ -45,12 +45,14 @@ def backoff_delay_s(n_failures: int, cfg: WorkerSettings, rng: random.Random) ->
     return min(base * rng.uniform(1 - JITTER, 1 + JITTER), cfg.backoff_cap_s)
 
 
-def deadline(created_at: datetime, expires_at: datetime | None, cfg: WorkerSettings) -> tuple[int, str]:
-    """有效截止时间 = min(受理时间 + 最大重试时长, expires_at)，并返回届时的失败原因。
+def deadline(window_start_ms: int, expires_at: datetime | None, cfg: WorkerSettings) -> tuple[int, str]:
+    """有效截止时间 = min(重试窗口起点 + 最大重试时长, expires_at)，并返回届时的失败原因。
+
+    重试窗口起点是受理时间，或最近一次人工重放的时间。
 
     两者同时到时按已过期处理：业务约束优先于我方的重试预算。
     """
-    retry_deadline = store.to_ms(created_at) + int(cfg.max_retry_duration_s * 1000)
+    retry_deadline = window_start_ms + int(cfg.max_retry_duration_s * 1000)
     if expires_at is not None and store.to_ms(expires_at) <= retry_deadline:
         return store.to_ms(expires_at), store.REASON_EXPIRED
     return retry_deadline, store.REASON_RETRIES_EXHAUSTED

@@ -8,18 +8,21 @@ import logging
 import sqlite3
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from notifier import store
+from notifier import store, views
 from notifier.config import Settings, load_settings
+from notifier.delivery import Clock, system_clock
 from notifier.models import SubmitRequest, request_hash
 from notifier.netguard import BlockedTarget, Resolver, check_target, default_resolver
 
 log = logging.getLogger(__name__)
 
 
-def create_app(settings: Settings | None = None, resolver: Resolver = default_resolver) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, resolver: Resolver = default_resolver, clock: Clock = system_clock
+) -> FastAPI:
     settings = load_settings() if settings is None else settings
     store.init_schema(settings.db_path)
 
@@ -75,5 +78,45 @@ def create_app(settings: Settings | None = None, resolver: Resolver = default_re
             status_code=status.HTTP_409_CONFLICT,
             detail=f"幂等 key 已用于内容不同的请求（通知 {result.id}）",
         )
+
+    def not_found() -> HTTPException:
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="通知不存在")
+
+    @app.get("/notifications/{notification_id}")
+    def query(notification_id: str, caller: str = Depends(authenticate)) -> dict:
+        conn = store.connect(settings.db_path)
+        try:
+            n = store.get_for_caller(conn, notification_id, caller)
+            if n is None:
+                raise not_found()
+            return views.notification_view(n, store.list_attempts(conn, n.id))
+        finally:
+            conn.close()
+
+    @app.post("/notifications/{notification_id}/replay")
+    def replay(notification_id: str, caller: str = Depends(authenticate)) -> JSONResponse:
+        conn = store.connect(settings.db_path)
+        try:
+            result = store.replay(conn, notification_id, caller, clock())
+        finally:
+            conn.close()
+        if result == store.NOT_FOUND:
+            raise not_found()
+        if result == store.NOT_REPLAYABLE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="只有失败终态、且未过期的通知可以重放",
+            )
+        log.info("重放 id=%s caller=%s", notification_id, caller)
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"id": notification_id, "status": "pending"})
+
+    @app.get("/metrics")
+    def metrics() -> PlainTextResponse:
+        conn = store.connect(settings.db_path)
+        try:
+            text = views.prometheus_text(store.stats(conn, clock()))
+        finally:
+            conn.close()
+        return PlainTextResponse(text, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     return app

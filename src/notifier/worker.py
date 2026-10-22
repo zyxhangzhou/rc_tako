@@ -34,7 +34,9 @@ class Worker:
             return 0
         conn = store.connect(self.cfg.db_path)
         try:
-            claimed = store.claim_due(conn, self.deps.clock(), free, int(self.cfg.lease_s * 1000))
+            claimed = store.claim_due(
+                conn, self.deps.clock(), free, int(self.cfg.lease_s * 1000), per_host_limit=self.cfg.per_host_limit
+            )
         finally:
             conn.close()
         futures = [self._pool.submit(self._deliver, c) for c in claimed]

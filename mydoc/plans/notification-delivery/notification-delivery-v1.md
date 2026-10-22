@@ -33,7 +33,7 @@
 |---|---|---|---|---|---|
 | 1 | A | 受理与持久化 | `archive/2026-10-22-intake-persistence` | — | archived |
 | 2 | B | 投递引擎（至少一次、失败分类、退避重试、终态） | `archive/2026-10-22-delivery-engine` | A | archived |
-| 3 | C | 隔离与运维 | — | B | planned |
+| 3 | C | 隔离与运维 | `archive/2026-10-22-isolation-ops` | B | archived |
 
 ### A — 受理与持久化
 
@@ -92,7 +92,7 @@
 
 ## 交付收尾（不走 OpenSpec）
 
-- [ ] 每个 change 归档时，增量更新 README：问题理解、架构、关键决策。
+- [x] 每个 change 归档时，增量更新 README：问题理解、架构、关键决策。
 - [ ] README 或设计文档逐条回答题目的"设计说明要求"：系统边界、投递语义、长期不可用时的策略、不采纳的 AI 建议、演进方向。
 - [ ] 把 docs/ai-review.md 整理进"不采纳的 AI 建议"一节。
 - [ ] 把 AI 会话记录打包成 zip，放进仓库。
@@ -120,9 +120,9 @@
 
 ## Open questions
 
-- [NEEDS DECISION] 存储选型。A 开始时由 AI 给出方案，候选人拍板。
-- [NEEDS DECISION] 是否严格防范 DNS rebinding。B 开始时评估，候选人拍板。
-- [NEEDS DECISION] C 是否全部实现。C 开始时由候选人决定。
+- ~~[NEEDS DECISION] 存储选型~~ → 候选人拍板：SQLite（见 docs/ai-review.md A-1）
+- ~~[NEEDS DECISION] 是否严格防范 DNS rebinding~~ → 候选人拍板：投递前校验，接受残余窗口（见 B-3）
+- ~~[NEEDS DECISION] C 是否全部实现~~ → 2026-10-22 候选人拍板：全做（见 docs/ai-review.md C-1）
 
 ## Status log
 
@@ -135,3 +135,6 @@
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · B 实现完成：tasks 16/16，147 个测试通过，validate --strict 通过；待候选人验收后 archive
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · B 收尾：修复 API 与 worker 并发冷启动时 init_schema 的两个竞态（已加回归测试），共 148 个测试通过
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · B 验收通过并 archive（2026-10-22-delivery-engine）：main specs 新建 notification-delivery，更新 notification-intake（修改 1 条需求）、notification-store（新增 3 条需求）
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · C 开始：openspec change `isolation-ops` 已创建
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · C 实现完成：tasks 12/12，179 个测试通过，validate --strict 通过；待候选人验收后 archive
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · C 验收通过并 archive（2026-10-22-isolation-ops）：main specs 新建 notification-query、notification-replay、service-metrics，更新 notification-delivery（新增 1 条、修改 1 条）

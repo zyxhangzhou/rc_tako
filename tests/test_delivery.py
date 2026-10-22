@@ -171,3 +171,15 @@ def test_large_response_excerpt_truncated(env):
         _deliver(conn, cfg, clock, deps)
     [a] = store.list_attempts(conn, nid)
     assert len(a.response_excerpt) == 1024
+
+
+def test_deadline_counts_from_retry_window_start(env):
+    """重试窗口起点被重置（重放）后，受理 25 小时的通知不会被判为重试耗尽。"""
+    conn, cfg, clock, deps = env
+    with FakeDownstream([Reply(200)]) as ds:
+        nid = insert(conn, ds.url)
+        clock.advance(25 * 3600)
+        conn.execute("UPDATE notifications SET retry_window_start = ? WHERE id = ?", (clock(), nid))
+        conn.commit()
+        assert _deliver(conn, cfg, clock, deps) == store.STATUS_DELIVERED
+    assert ds.count() == 1

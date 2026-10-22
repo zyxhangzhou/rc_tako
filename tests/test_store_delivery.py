@@ -53,7 +53,7 @@ def test_upgrade_from_v1_keeps_data_and_makes_pending_due(tmp_path):
 
     store.init_schema(path)
     c = store.connect(path)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert c.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
     n = store.get(c, "n1")
     assert (n.url, n.headers, n.body, n.status, n.attempt_count) == ("https://a.example/x", {"A": "1"}, "body", "pending", 0)
     claimed = store.claim_due(c, now_ms=store.to_ms(datetime.now(timezone.utc)), limit=10, lease_ms=LEASE)
@@ -182,3 +182,91 @@ def test_concurrent_cold_start_init_schema(tmp_path):
     assert errors == []
     c = store.connect(path)
     assert c.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+
+
+# --- v3：target_host 与 retry_window_start ---
+
+def test_upgrade_from_v2_backfills_host_and_window(tmp_path):
+    path = tmp_path / "v2.db"
+    old = sqlite3.connect(path)
+    old.executescript(store._MIGRATIONS[1] + store._MIGRATIONS[2] + "PRAGMA user_version=2;")
+    old.execute(
+        "INSERT INTO notifications (id, caller, idempotency_key, request_hash, url, method, headers_json, body,"
+        " expires_at, status, created_at, next_attempt_at, attempt_count)"
+        " VALUES ('n1','crm','k1','h','https://API.Example.com:8443/x?y=1','POST','{}','b',NULL,'pending',"
+        "'2026-10-22T10:00:00+00:00', 5, 2)"
+    )
+    old.commit()
+    old.close()
+
+    store.init_schema(path)
+    c = store.connect(path)
+    n = store.get(c, "n1")
+    assert n.target_host == "api.example.com"
+    assert n.retry_window_start == store.to_ms(datetime(2026, 10, 22, 10, tzinfo=timezone.utc))
+    assert (n.next_attempt_at, n.attempt_count, n.body) == (5, 2, "b")
+
+
+def test_new_notification_has_host_and_window(conn):
+    nid = _insert(conn, url="https://Hooks.Example.com/a")
+    n = store.get(conn, nid)
+    assert n.target_host == "hooks.example.com"
+    assert n.retry_window_start == store.to_ms(n.created_at)
+
+
+# --- 按 host 限流 ---
+
+def _due_now(conn):
+    return conn.execute("SELECT max(next_attempt_at) FROM notifications").fetchone()[0]
+
+
+def _delivering_by_host(conn):
+    return dict(
+        conn.execute(
+            "SELECT target_host, count(*) FROM notifications WHERE status = 'delivering' GROUP BY target_host"
+        ).fetchall()
+    )
+
+
+def test_per_host_cap_and_refill(conn):
+    for i in range(10):
+        _insert(conn, f"x{i}", url=f"https://x.example.com/{i}")
+    t = _due_now(conn)
+    first = store.claim_due(conn, t, limit=16, lease_ms=LEASE, per_host_limit=4)
+    assert len(first) == 4
+    # 已满，再取一个也拿不到
+    assert store.claim_due(conn, t, limit=16, lease_ms=LEASE, per_host_limit=4) == []
+    # 完成 1 条后可以补 1 条
+    store.mark_delivered(conn, first[0], _attempt("success", 200), datetime.now(timezone.utc))
+    assert len(store.claim_due(conn, t, limit=16, lease_ms=LEASE, per_host_limit=4)) == 1
+    assert _delivering_by_host(conn) == {"x.example.com": 4}
+
+
+def test_per_host_cap_is_independent_per_host(conn):
+    for i in range(6):
+        _insert(conn, f"x{i}", url="https://x.example.com/")
+        _insert(conn, f"y{i}", url="https://y.example.com/")
+    got = store.claim_due(conn, _due_now(conn), limit=16, lease_ms=LEASE, per_host_limit=2)
+    assert len(got) == 4
+    assert _delivering_by_host(conn) == {"x.example.com": 2, "y.example.com": 2}
+
+
+def test_expired_leases_do_not_count_toward_cap(conn):
+    for i in range(4):
+        _insert(conn, f"x{i}", url="https://x.example.com/")
+    t = _due_now(conn)
+    assert len(store.claim_due(conn, t, limit=16, lease_ms=LEASE, per_host_limit=2)) == 2
+    # 2 条占用过期后：它们不再占名额，可以和剩下的 2 条一起被重新取（仍受上限 2 约束）
+    got = store.claim_due(conn, t + LEASE, limit=16, lease_ms=LEASE, per_host_limit=2)
+    # 若过期占用仍计入名额，这里会一条都取不到
+    assert len(got) == 2
+    active = conn.execute(
+        "SELECT count(*) FROM notifications WHERE status='delivering' AND lease_until > ?", (t + LEASE,)
+    ).fetchone()[0]
+    assert active == 2
+
+
+def test_limit_still_applies_across_hosts(conn):
+    for h in "abcdef":
+        _insert(conn, h, url=f"https://{h}.example.com/")
+    assert len(store.claim_due(conn, _due_now(conn), limit=3, lease_ms=LEASE, per_host_limit=4)) == 3

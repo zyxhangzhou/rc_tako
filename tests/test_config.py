@@ -69,3 +69,11 @@ def test_worker_invalid(env):
     full = {ENV_DB_PATH: "n.db", **env} if env else {}
     with pytest.raises(ConfigError):
         load_worker_settings(full)
+
+
+def test_per_host_limit_default_and_bounds():
+    assert load_worker_settings({ENV_DB_PATH: "n.db"}).per_host_limit == 4
+    assert load_worker_settings({ENV_DB_PATH: "n.db", "NOTIFIER_WORKER_PER_HOST_LIMIT": "16"}).per_host_limit == 16
+    for bad in ("0", "17", "x"):
+        with pytest.raises(ConfigError):
+            load_worker_settings({ENV_DB_PATH: "n.db", "NOTIFIER_WORKER_PER_HOST_LIMIT": bad})
