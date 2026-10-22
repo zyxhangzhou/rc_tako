@@ -41,3 +41,56 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         raise ConfigError(f"token 文件必须是非空的 {{token: 调用方名称}} 映射: {tokens_file}")
 
     return Settings(db_path=Path(db_path), tokens=raw)
+
+
+@dataclass(frozen=True)
+class WorkerSettings:
+    db_path: Path
+    concurrency: int = 16
+    poll_interval_s: float = 1.0
+    lease_s: float = 60.0
+    request_timeout_s: float = 10.0
+    backoff_base_s: float = 10.0
+    backoff_cap_s: float = 3600.0
+    max_retry_duration_s: float = 24 * 3600.0
+
+
+# 环境变量名 -> (字段名, 类型)
+_WORKER_ENV = {
+    "NOTIFIER_WORKER_CONCURRENCY": ("concurrency", int),
+    "NOTIFIER_WORKER_POLL_INTERVAL_S": ("poll_interval_s", float),
+    "NOTIFIER_WORKER_LEASE_S": ("lease_s", float),
+    "NOTIFIER_WORKER_REQUEST_TIMEOUT_S": ("request_timeout_s", float),
+    "NOTIFIER_WORKER_BACKOFF_BASE_S": ("backoff_base_s", float),
+    "NOTIFIER_WORKER_BACKOFF_CAP_S": ("backoff_cap_s", float),
+    "NOTIFIER_WORKER_MAX_RETRY_DURATION_S": ("max_retry_duration_s", float),
+}
+
+
+def load_worker_settings(env: dict[str, str] | None = None) -> WorkerSettings:
+    """worker 只需要数据库路径，不读 token 文件。"""
+    env = os.environ if env is None else env
+    db_path = env.get(ENV_DB_PATH)
+    if not db_path:
+        raise ConfigError(f"缺少必需的环境变量: {ENV_DB_PATH}")
+
+    overrides = {}
+    for name, (field, typ) in _WORKER_ENV.items():
+        raw = env.get(name)
+        if raw is None:
+            continue
+        try:
+            value = typ(raw)
+        except ValueError:
+            raise ConfigError(f"{name} 必须是{'整数' if typ is int else '数字'}: {raw!r}") from None
+        if value <= 0:
+            raise ConfigError(f"{name} 必须大于 0: {raw!r}")
+        overrides[field] = value
+
+    s = WorkerSettings(db_path=Path(db_path), **overrides)
+    # 占用期限必须覆盖一次完整请求，否则请求还没结束通知就会被别人重新取走
+    if s.lease_s <= s.request_timeout_s:
+        raise ConfigError("NOTIFIER_WORKER_LEASE_S 必须大于 NOTIFIER_WORKER_REQUEST_TIMEOUT_S")
+    if s.backoff_cap_s < s.backoff_base_s:
+        raise ConfigError("NOTIFIER_WORKER_BACKOFF_CAP_S 不能小于 NOTIFIER_WORKER_BACKOFF_BASE_S")
+    return s

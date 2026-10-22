@@ -32,7 +32,7 @@
 | Order | ID | Change | Ref | Depends on | Status |
 |---|---|---|---|---|---|
 | 1 | A | 受理与持久化 | `archive/2026-10-22-intake-persistence` | — | archived |
-| 2 | B | 投递引擎（至少一次、失败分类、退避重试、终态） | — | A | planned |
+| 2 | B | 投递引擎（至少一次、失败分类、退避重试、终态） | `archive/2026-10-22-delivery-engine` | A | archived |
 | 3 | C | 隔离与运维 | — | B | planned |
 
 ### A — 受理与持久化
@@ -131,3 +131,7 @@
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · A 开始：openspec change `intake-persistence` 已创建
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · A 实现完成：tasks 16/16，75 个测试通过，validate --strict 通过；待候选人验收后 archive
 - 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · A 验收通过并 archive（2026-10-22-intake-persistence），main specs 新建 notification-intake、notification-store
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · B 开始：openspec change `delivery-engine` 已创建
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · B 实现完成：tasks 16/16，147 个测试通过，validate --strict 通过；待候选人验收后 archive
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · B 收尾：修复 API 与 worker 并发冷启动时 init_schema 的两个竞态（已加回归测试），共 148 个测试通过
+- 2026-10-22 · edba609d-5f50-4748-b206-3de02b21dfa6 · B 验收通过并 archive（2026-10-22-delivery-engine）：main specs 新建 notification-delivery，更新 notification-intake（修改 1 条需求）、notification-store（新增 3 条需求）

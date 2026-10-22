@@ -148,3 +148,29 @@ def test_concurrent_duplicate_submits_create_one_row(app, db):
     assert codes.count(202) == 1 and codes.count(200) == n - 1, codes
     assert len({r.json()["id"] for r in results}) == 1
     assert row_count(db) == 1
+
+
+# --- 受理时 DNS 解析超时（delivery-engine 修改的场景）---
+
+def test_slow_dns_accepted_within_timeout(settings, db):
+    from notifier.app import create_app
+    from notifier.netguard import with_timeout
+
+    release = threading.Event()
+
+    def hanging(host):
+        release.wait(5)
+        return ["93.184.216.34"]
+
+    app = create_app(settings, resolver=with_timeout(hanging))  # 默认 2s 超时
+    try:
+        with TestClient(app) as c:
+            import time
+
+            start = time.monotonic()
+            r = c.post("/notifications", json=payload(url="https://slow.example.com/hook"), headers=auth())
+            elapsed = time.monotonic() - start
+        assert r.status_code == 202
+        assert 1.9 <= elapsed < 3, elapsed
+    finally:
+        release.set()

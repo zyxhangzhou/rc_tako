@@ -67,3 +67,50 @@ def test_domain_resolving_to_public_only_allowed():
     check_target(
         "https://api.example.com/", resolver=resolver_returning("93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946")
     )
+
+
+# --- 解析超时与严格模式 ---
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from notifier.netguard import ResolveTimeout, TargetUnresolvable, with_timeout  # noqa: E402
+
+
+@pytest.fixture
+def hanging_resolver():
+    release = threading.Event()
+
+    def resolve(host):
+        release.wait(5)
+        return ["93.184.216.34"]
+
+    yield resolve
+    release.set()
+
+
+def test_resolve_timeout_raises(hanging_resolver):
+    resolve = with_timeout(hanging_resolver, timeout_s=0.2)
+    start = time.monotonic()
+    with pytest.raises(ResolveTimeout):
+        resolve("slow.example.com")
+    assert time.monotonic() - start < 1
+
+
+def test_lenient_mode_allows_on_timeout(hanging_resolver):
+    check_target("https://slow.example.com/", resolver=with_timeout(hanging_resolver, timeout_s=0.2))
+
+
+def test_strict_mode_unresolvable_is_retryable():
+    with pytest.raises(TargetUnresolvable):
+        check_target("https://flaky.example.com/", resolver=failing_resolver, strict=True)
+
+
+def test_strict_mode_timeout_is_retryable(hanging_resolver):
+    with pytest.raises(TargetUnresolvable):
+        check_target("https://slow.example.com/", resolver=with_timeout(hanging_resolver, timeout_s=0.2), strict=True)
+
+
+def test_strict_mode_still_blocks_private():
+    with pytest.raises(BlockedTarget):
+        check_target("https://internal.example.com/", resolver=resolver_returning("10.0.0.5"), strict=True)

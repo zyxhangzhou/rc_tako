@@ -14,12 +14,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from notifier import store
 from notifier.config import Settings, load_settings
 from notifier.models import SubmitRequest, request_hash
-from notifier.netguard import BlockedTarget, Resolver, check_target, system_resolver
+from notifier.netguard import BlockedTarget, Resolver, check_target, default_resolver
 
 log = logging.getLogger(__name__)
 
 
-def create_app(settings: Settings | None = None, resolver: Resolver = system_resolver) -> FastAPI:
+def create_app(settings: Settings | None = None, resolver: Resolver = default_resolver) -> FastAPI:
     settings = load_settings() if settings is None else settings
     store.init_schema(settings.db_path)
 

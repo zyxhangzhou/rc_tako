@@ -6,13 +6,27 @@
 import ipaddress
 import socket
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from urllib.parse import urlsplit
 
 Resolver = Callable[[str], list[str]]
 
+RESOLVE_TIMEOUT_S = 2.0
+# getaddrinfo 无法取消，超时后线程会在后台跑完；池有界，DNS 全面变慢时也不会无限堆线程
+_resolve_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dns")
+
 
 class BlockedTarget(Exception):
     pass
+
+
+class ResolveTimeout(OSError):
+    pass
+
+
+class TargetUnresolvable(Exception):
+    """严格模式下解析失败或超时：可重试的临时错误。"""
 
 
 def is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -33,8 +47,26 @@ def system_resolver(host: str) -> list[str]:
     return [info[4][0] for info in infos]
 
 
-def check_target(url: str, resolver: Resolver = system_resolver) -> None:
-    """目标被禁止时抛出 BlockedTarget。域名解析失败时放行，交给投递侧再判。"""
+def with_timeout(resolver: Resolver, timeout_s: float = RESOLVE_TIMEOUT_S) -> Resolver:
+    def resolve(host: str) -> list[str]:
+        future = _resolve_pool.submit(resolver, host)
+        try:
+            return future.result(timeout=timeout_s)
+        except FutureTimeout:
+            raise ResolveTimeout(f"解析 {host} 超过 {timeout_s}s") from None
+
+    return resolve
+
+
+default_resolver: Resolver = with_timeout(system_resolver)
+
+
+def check_target(url: str, resolver: Resolver = default_resolver, strict: bool = False) -> None:
+    """目标被禁止时抛出 BlockedTarget。
+
+    域名解析失败或超时：受理侧（strict=False）放行，交给投递侧再判；
+    投递侧（strict=True）抛出 TargetUnresolvable，按临时失败重试。
+    """
     host = urlsplit(url).hostname
     if host is None:
         raise BlockedTarget("url 缺少 host")
@@ -50,8 +82,10 @@ def check_target(url: str, resolver: Resolver = system_resolver) -> None:
 
     try:
         addresses = resolver(host)
-    except (OSError, UnicodeError):
-        # 临时 DNS 故障不应变成业务失败（design D4）
+    except (OSError, UnicodeError) as e:
+        if strict:
+            raise TargetUnresolvable(f"无法解析 {host}: {e}") from None
+        # 临时 DNS 故障不应变成业务失败（change A design D4）
         return
     for addr in addresses:
         if is_blocked_ip(ipaddress.ip_address(addr.split("%", 1)[0])):
